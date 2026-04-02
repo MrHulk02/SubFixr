@@ -2,9 +2,9 @@
 
 SubFixr is a small command-line tool for fixing and cleaning subtitle files.
 
-It’s mainly for those moments when subtitles are slightly out of sync, or when you want to remove things like watermarks, ads, or unwanted lines quickly without opening a full editor.
+It's mainly for those moments when subtitles are slightly out of sync, or when you want to remove things like watermarks, ads, or unwanted lines quickly without opening a full editor.
 
-It can shift SRT timestamps forward or backward, remove subtitle blocks by number, and drop blocks that contain matching text. If you have MKVToolNix installed, it can also extract subtitle tracks from `.mks` files and process them the same way.
+It can shift SRT timestamps forward or backward, remove subtitle blocks by number, and drop blocks that contain matching text. If you have MKVToolNix installed, it can also extract subtitle tracks from `.mks` files or rebuild a new `.mks` after applying the same fixes.
 
 ---
 
@@ -23,6 +23,7 @@ It can shift SRT timestamps forward or backward, remove subtitle blocks by numbe
 * Process a single file or a whole folder
 * Walk subfolders with `--recursive`
 * Write output next to the source file or to a custom path
+* Rebuild `.mks` files while keeping subtitle track order, language tags, and track names
 
 ---
 
@@ -65,6 +66,9 @@ You need to pass at least one of these:
 
 * `--overwrite`
   Replace output files if they already exist
+
+* `--mks-output`
+  When the input is `.mks`, rebuild a new `.mks` instead of writing extracted `.srt` tracks
 
 ---
 
@@ -124,6 +128,12 @@ Extract subtitle tracks from an `.mks` file and write them to a folder:
 python subfixr.py file.mks -s 1s -d for -o output_folder/
 ```
 
+Rebuild a cleaned `.mks` while keeping the original subtitle container layout:
+
+```bash
+python subfixr.py file.mks --remove "viki" --mks-output
+```
+
 ---
 
 ## Order of operations
@@ -139,7 +149,7 @@ If you combine options, SubFixr runs them in this order:
 ## Notes
 
 * Output defaults to a new file next to the source (usually with `_synced` added to the name)
-* `.mks` support depends on `mkvextract` and `mkvinfo` being available on your system
+* `.mks` support depends on `mkvextract` and `mkvmerge` being available on your system
 
 ---
 
