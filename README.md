@@ -4,7 +4,7 @@ SubFixr is a small command-line tool for fixing and cleaning subtitle files.
 
 It's mainly for those moments when subtitles are slightly out of sync, or when you want to remove things like watermarks, ads, or unwanted lines quickly without opening a full editor.
 
-It can shift SRT timestamps forward or backward, remove subtitle blocks by number, and drop blocks that contain matching text. If you have MKVToolNix installed, it can also extract subtitle tracks from `.mks` files or rebuild a new `.mks` after applying the same fixes.
+It can shift SRT timestamps forward or backward, retime subtitles from one FPS to another, remove subtitle blocks by number, and drop blocks that contain matching text. If you have MKVToolNix installed, it can also extract subtitle tracks from `.mks` files or rebuild a new `.mks` after applying the same fixes.
 
 ---
 
@@ -18,6 +18,7 @@ It can shift SRT timestamps forward or backward, remove subtitle blocks by numbe
 ## What it does
 
 * Shift subtitle timing forward or backward
+* Retime subtitles from one FPS to another
 * Remove subtitle blocks by number or range
 * Remove subtitle blocks that contain specific text
 * Process a single file or a whole folder
@@ -36,6 +37,7 @@ python subfixr.py input [options]
 You need to pass at least one of these:
 
 * `--shift`
+* `--fps`
 * `--remove`
 * `--delete-lines`
 
@@ -48,6 +50,9 @@ You need to pass at least one of these:
 
 * `-s, --shift`
   Shift amount like `1s`, `500ms`, `1min`, or plain seconds like `1.5`
+
+* `--fps`
+  Subtitle FPS retime in `source:target` or `source target` format like `25:23.976`, `25 23.976`, or `24000/1001:25`
 
 * `-d, --direction`
   `forward` / `for` or `backward` / `back`
@@ -80,6 +85,18 @@ Shift one file forward by one second:
 python subfixr.py file.srt -s 1s -d for
 ```
 
+Convert one subtitle from 25 FPS timing to 23.976 FPS timing:
+
+```bash
+python subfixr.py file.srt --fps 25:23.976
+```
+
+The same FPS change using two separate values:
+
+```bash
+python subfixr.py file.srt --fps 25 23.976
+```
+
 Shift every subtitle in a folder back by 500 ms:
 
 ```bash
@@ -110,6 +127,12 @@ Remove a few blocks, then shift the rest:
 python subfixr.py file.srt --delete-lines 1,3,10-15 -s 750ms -d back
 ```
 
+Retime by FPS first, then add a small forward shift:
+
+```bash
+python subfixr.py file.srt --fps 24000/1001:25 -s 300ms -d for
+```
+
 Remove blocks that contain some text:
 
 ```bash
@@ -131,7 +154,7 @@ python subfixr.py file.mks -s 1s -d for -o output_folder/
 Rebuild a cleaned `.mks` while keeping the original subtitle container layout:
 
 ```bash
-python subfixr.py file.mks --remove "viki" --mks-output
+python subfixr.py file.mks --remove "viki" --fps 25:23.976 --mks-output
 ```
 
 ---
@@ -142,7 +165,8 @@ If you combine options, SubFixr runs them in this order:
 
 1. `--delete-lines`
 2. `--remove`
-3. timestamp shift
+3. FPS retime
+4. timestamp shift
 
 ---
 

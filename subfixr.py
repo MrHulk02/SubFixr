@@ -62,13 +62,13 @@ def timecode_from_ms(total_ms):
     return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
 
 
-def shift_time_row(row, delta):
+def adjust_time_row(row, fps_scale=1.0, delta=0):
     hit = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})$', row)
     if not hit:
         return row
     start, end = hit.groups()
-    moved_start = timecode_from_ms(ms_from_timecode(start) + delta)
-    moved_end = timecode_from_ms(ms_from_timecode(end) + delta)
+    moved_start = timecode_from_ms(round(ms_from_timecode(start) * fps_scale) + delta)
+    moved_end = timecode_from_ms(round(ms_from_timecode(end) * fps_scale) + delta)
     return f"{moved_start} --> {moved_end}"
 
 
@@ -93,6 +93,71 @@ def clean_direction(raw):
     if raw in ('back', 'backward', 'bwd', 'b'):
         return 'backward'
     raise ValueError(f"Invalid direction: {raw}. Use forward/for or backward/back")
+
+
+def parse_fps_value(raw):
+    raw = raw.strip().lower()
+    if not raw:
+        raise ValueError("FPS value cannot be empty")
+
+    if '/' in raw:
+        left, right = [part.strip() for part in raw.split('/', 1)]
+        try:
+            numerator = float(left)
+            denominator = float(right)
+        except ValueError as exc:
+            raise ValueError(f"Invalid FPS value: {raw}") from exc
+        if denominator == 0:
+            raise ValueError(f"Invalid FPS value: {raw}. Denominator cannot be zero")
+        value = numerator / denominator
+    else:
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid FPS value: {raw}") from exc
+
+    if value <= 0:
+        raise ValueError(f"Invalid FPS value: {raw}. FPS must be greater than zero")
+    return value
+
+
+def parse_fps_change(raw):
+    if isinstance(raw, (list, tuple)):
+        pieces = [str(part).strip() for part in raw if str(part).strip()]
+        if len(pieces) == 2:
+            source_label, target_label = pieces
+        elif len(pieces) == 1:
+            raw = pieces[0]
+        else:
+            raise ValueError("Invalid --fps value: use source:target like 25:23.976 or pass two values like --fps 25 23.976")
+
+    if isinstance(raw, str):
+        raw = raw.strip()
+        pieces = re.split(r'\s*(?:->|:|to)\s*', raw, maxsplit=1)
+        if len(pieces) == 2 and pieces[0] and pieces[1]:
+            source_label = pieces[0].strip()
+            target_label = pieces[1].strip()
+        else:
+            try:
+                parse_fps_value(raw)
+            except ValueError:
+                raise ValueError("Invalid --fps value: use source:target like 25:23.976 or pass two values like --fps 25 23.976") from None
+            raise ValueError(f"Invalid --fps value: a single FPS like {raw} is ambiguous. Use source:target like 25:{raw} or pass two values like --fps 25 {raw}")
+    elif not isinstance(raw, (list, tuple)):
+        raise ValueError("Invalid --fps value: use source:target like 25:23.976 or pass two values like --fps 25 23.976")
+
+    source = parse_fps_value(source_label)
+    target = parse_fps_value(target_label)
+    if abs(source - target) < 1e-12:
+        raise ValueError("Invalid --fps value: source and target FPS are the same")
+
+    return {
+        'source': source,
+        'target': target,
+        'scale': source / target,
+        'source_label': source_label,
+        'target_label': target_label,
+    }
 
 
 def load_text(path, limit=None):
@@ -204,7 +269,7 @@ def drop_blocks_by_text(text, needle):
     return join_blocks(keep), hit_count
 
 
-def render_fixed_subtitle(src, shift_value, direction, remove_text=None, delete_lines=None):
+def render_fixed_subtitle(src, shift_value, direction, remove_text=None, delete_lines=None, fps_change=None):
     delta = 0
     if shift_value:
         if not direction:
@@ -212,6 +277,7 @@ def render_fixed_subtitle(src, shift_value, direction, remove_text=None, delete_
         delta = parse_shift(shift_value)
         if direction == 'backward':
             delta = -delta
+    fps_scale = fps_change['scale'] if fps_change else 1.0
 
     text, line_ending = load_text(src)
     removed_by_number = 0
@@ -224,19 +290,23 @@ def render_fixed_subtitle(src, shift_value, direction, remove_text=None, delete_
         text, removed_by_text = drop_blocks_by_text(text, remove_text)
 
     out = []
-    moved = 0
+    timed_rows = 0
     for row in text.splitlines():
-        if delta and TIME_ROW.match(row):
-            out.append(shift_time_row(row, delta))
-            moved += 1
+        if TIME_ROW.match(row):
+            if fps_change or delta:
+                out.append(adjust_time_row(row, fps_scale, delta))
+                timed_rows += 1
+            else:
+                out.append(row)
         else:
             out.append(row)
 
     return line_ending.join(out), {
         'delta': delta,
+        'fps_change': fps_change,
         'removed_by_number': removed_by_number,
         'removed_by_text': removed_by_text,
-        'moved': moved,
+        'timed_rows': timed_rows,
     }
 
 
@@ -249,8 +319,8 @@ def write_text(path, text):
         fh.write(text)
 
 
-def fix_one(src, dst, shift_value, direction, remove_text=None, delete_lines=None):
-    rendered, stats = render_fixed_subtitle(src, shift_value, direction, remove_text, delete_lines)
+def fix_one(src, dst, shift_value, direction, remove_text=None, delete_lines=None, fps_change=None):
+    rendered, stats = render_fixed_subtitle(src, shift_value, direction, remove_text, delete_lines, fps_change)
 
     if delete_lines:
         print(f"    Removed {stats['removed_by_number']} subtitle block(s) from '{delete_lines}'")
@@ -261,8 +331,11 @@ def fix_one(src, dst, shift_value, direction, remove_text=None, delete_lines=Non
     write_text(dst, rendered)
 
     print(f"[+] Processed: {os.path.basename(src)}")
+    if stats['fps_change']:
+        change = stats['fps_change']
+        print(f"    FPS: {change['source_label']} -> {change['target_label']} ({stats['timed_rows']} timestamps retimed)")
     if stats['delta']:
-        print(f"    Shift: {direction} by {shift_value} ({stats['moved']} timestamps shifted)")
+        print(f"    Shift: {direction} by {shift_value} ({stats['timed_rows']} timestamps shifted)")
     print(f"    Output: {dst}")
     return stats
 
@@ -496,7 +569,7 @@ def remux_mks(job, dst):
         raise RuntimeError(f"mkvmerge failed: {msg or 'Unknown error'}")
 
 
-def process_mks_file(job, dst, shift_value, direction, remove_text=None, delete_lines=None):
+def process_mks_file(job, dst, shift_value, direction, remove_text=None, delete_lines=None, fps_change=None):
     print(f"[+] Rebuilding: {os.path.basename(job['source'])}")
     passthrough = 0
     for track in job['tracks']:
@@ -506,7 +579,7 @@ def process_mks_file(job, dst, shift_value, direction, remove_text=None, delete_
             continue
 
         edited_path = os.path.join(os.path.dirname(extracted), f"edited_track{track['id']}.srt")
-        rendered, stats = render_fixed_subtitle(extracted, shift_value, direction, remove_text, delete_lines)
+        rendered, stats = render_fixed_subtitle(extracted, shift_value, direction, remove_text, delete_lines, fps_change)
         write_text(edited_path, rendered)
         track['processed_path'] = edited_path
 
@@ -515,8 +588,11 @@ def process_mks_file(job, dst, shift_value, direction, remove_text=None, delete_
             print(f"      Removed {stats['removed_by_number']} subtitle block(s) from '{delete_lines}'")
         if remove_text:
             print(f"      Removed {stats['removed_by_text']} subtitle block(s) containing '{remove_text}'")
+        if stats['fps_change']:
+            change = stats['fps_change']
+            print(f"      FPS: {change['source_label']} -> {change['target_label']} ({stats['timed_rows']} timestamps retimed)")
         if stats['delta']:
-            print(f"      Shift: {direction} by {shift_value} ({stats['moved']} timestamps shifted)")
+            print(f"      Shift: {direction} by {shift_value} ({stats['timed_rows']} timestamps shifted)")
 
     if passthrough:
         print(f"    Preserved {passthrough} original subtitle track(s) without edits")
@@ -558,7 +634,7 @@ def scan_inputs(input_path, recursive=False, include_mks=False):
     return srt_files, mks_files
 
 
-def process_path(input_path, output_path, shift_value, direction, recursive=False, overwrite=False, remove_text=None, delete_lines=None, mks_output=False):
+def process_path(input_path, output_path, shift_value, direction, recursive=False, overwrite=False, remove_text=None, delete_lines=None, mks_output=False, fps_change=None):
     srt_files, mks_files = scan_inputs(input_path, recursive, include_mks=True)
 
     folder_mode = os.path.isdir(input_path)
@@ -615,6 +691,8 @@ def process_path(input_path, output_path, shift_value, direction, recursive=Fals
         print(f"[+] Found {len(mks_files)} MKS file(s)")
     else:
         print(f"[+] Found {len(srt_files)} subtitle file(s)")
+    if fps_change:
+        print(f"[+] FPS: {fps_change['source_label']} -> {fps_change['target_label']}")
     if shift_value:
         print(f"[+] Shift: {direction} by {shift_value}")
     if delete_lines:
@@ -687,7 +765,7 @@ def process_path(input_path, output_path, shift_value, direction, recursive=Fals
                 continue
 
             try:
-                fix_one(src, dst, shift_value, direction, remove_text, delete_lines)
+                fix_one(src, dst, shift_value, direction, remove_text, delete_lines, fps_change)
                 done += 1
             except Exception as exc:
                 print(f"[-] Error processing {os.path.basename(src)}: {exc}")
@@ -717,7 +795,7 @@ def process_path(input_path, output_path, shift_value, direction, recursive=Fals
                 work_dir = make_temp_workspace(temp_dir)
                 try:
                     job = pull_tracks_from_mks(src, work_dir, strict=True)
-                    process_mks_file(job, dst, shift_value, direction, remove_text, delete_lines)
+                    process_mks_file(job, dst, shift_value, direction, remove_text, delete_lines, fps_change)
                     done += 1
                 except Exception as exc:
                     print(f"[-] Error processing {os.path.basename(src)}: {exc}")
@@ -734,30 +812,66 @@ def process_path(input_path, output_path, shift_value, direction, recursive=Fals
 def main():
     parser = argparse.ArgumentParser(
         prog='SubFixr',
-        description='Shift subtitle timing, remove specific subtitle blocks, or drop blocks that match some text',
+        description='Shift subtitle timing, convert subtitle FPS, remove specific subtitle blocks, or drop blocks that match some text',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python subfixr.py file.srt -s 1s -d for
-  python subfixr.py folder/ -s 500ms -d back
-  python subfixr.py folder/ -s 1min -d forward -o output_folder/ -r
-  python subfixr.py temp/ -s 2.5s -d backward --overwrite
-  python subfixr.py file.srt --delete-lines 1-8
-  python subfixr.py file.srt --delete-lines 1,3,10-15 -s 750ms -d back
-  python subfixr.py file.srt --remove "viki"
-  python subfixr.py folder/ --remove "viki.com" -s 1s -d for
-  python subfixr.py file.mks -s 1s -d for -o output_folder/
-  python subfixr.py file.mks --remove "viki" --mks-output
+  python subfixr.py file.srt -s 1s -d forward
+      Shift subtitles forward by 1 second.
 
-If you combine options, they run in this order:
+  python subfixr.py file.srt --fps 25:23.976
+  python subfixr.py file.srt --fps 25 23.976
+      Retime subtitles from 25 FPS to 23.976 FPS.
+
+  python subfixr.py folder/ -s 500ms -d backward
+      Shift all subtitle files in folder/ backward by 500 milliseconds.
+
+  python subfixr.py folder/ -s 1min -d forward -o output_folder/ -r
+      Shift all subtitles forward by 1 minute, save to output_folder/,
+      and include subfolders.
+
+  python subfixr.py temp/ -s 2.5s -d backward --overwrite
+      Shift subtitles backward by 2.5 seconds and overwrite originals.
+
+  python subfixr.py output/ -s 1s -d forward -o output_folder/
+      Shift subtitles forward by 1 second and save to output_folder/.
+
+  python subfixr.py file.srt --delete-lines 1-8
+      Remove subtitle blocks 1 through 8.
+
+  python subfixr.py file.srt --delete-lines 1,3,10-15 -s 750ms -d backward
+      Remove selected blocks, then shift remaining subtitles backward by 750 ms.
+
+  python subfixr.py file.srt --fps 24000/1001:25 -s 300ms -d forward
+  python subfixr.py file.srt --fps 24000/1001 25 -s 300ms -d forward
+      Retime from 24000/1001 FPS to 25 FPS, then shift forward by 300 ms.
+
+  python subfixr.py file.srt --remove "viki"
+      Remove subtitle blocks containing "viki".
+
+  python subfixr.py folder/ --remove "viki.com" -s 1s -d forward
+      Remove matching blocks, then shift all subtitles forward by 1 second.
+
+  python subfixr.py file.mks -s 1s -d forward -o output_folder/
+      Extract, shift, and save subtitles from file.mks to output_folder/.
+
+  python subfixr.py file.mks --remove "viki" --fps 25:23.976 --mks-output
+      Remove matching blocks, retime FPS, and rebuild as an MKS file.
+
+  python subfixr.py file.srt --delete-lines 1-5 --remove "ads" --fps 25:23.976 -s 1s -d forward
+      Apply all operations: delete blocks, remove text, retime FPS, then shift.
+
+When multiple options are combined, they are applied in this order:
   1. --delete-lines
   2. --remove
-  3. timestamp shift
+  3. --fps
+  4. timestamp shift (--shift with --direction)
         """
     )
     parser.add_argument('input', help='Subtitle file (.srt or .mks) or a folder with subtitle files')
     parser.add_argument('-o', '--output', default=None, help='Where to write the result. Defaults to input_synced.srt/.mks or the source folder')
     parser.add_argument('-s', '--shift', default=None, help='How much to shift timestamps, for example 1s, 500ms, 1min, or plain seconds like 1.5')
+    parser.add_argument('--fps', nargs='+', default=None, help='Retiming FPS as source:target or source target, for example --fps 25:23.976 or --fps 25 23.976')
     parser.add_argument('-d', '--direction', default='forward', help='Which way to shift: forward/for or backward/back')
     parser.add_argument('--delete-lines', default=None, help='Subtitle block numbers or ranges to remove, for example 1-8 or 1,3,5-7')
     parser.add_argument('--remove', default=None, help='Remove subtitle blocks that contain this text (case-insensitive)')
@@ -767,13 +881,20 @@ If you combine options, they run in this order:
 
     args = parser.parse_args()
 
-    if not args.shift and not args.remove and not args.delete_lines:
-        parser.error('Nothing to do. Pass at least one of --shift, --remove, or --delete-lines')
+    if not args.shift and not args.remove and not args.delete_lines and not args.fps:
+        parser.error('Nothing to do. Pass at least one of --shift, --fps, --remove, or --delete-lines')
 
     direction = None
     if args.shift:
         try:
             direction = clean_direction(args.direction)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    fps_change = None
+    if args.fps:
+        try:
+            fps_change = parse_fps_change(args.fps)
         except ValueError as exc:
             parser.error(str(exc))
 
@@ -788,11 +909,12 @@ If you combine options, they run in this order:
         args.output,
         args.shift,
         direction,
-        args.recursive,
-        args.overwrite,
-        args.remove,
-        args.delete_lines,
-        args.mks_output,
+        recursive=args.recursive,
+        overwrite=args.overwrite,
+        remove_text=args.remove,
+        delete_lines=args.delete_lines,
+        mks_output=args.mks_output,
+        fps_change=fps_change,
     )
 
 
